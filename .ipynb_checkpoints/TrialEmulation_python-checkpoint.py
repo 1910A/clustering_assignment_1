@@ -4,7 +4,7 @@ import statsmodels.api as sm
 import os
 # import tempfile
 from patsy import dmatrix  # For formula parsing (optional, if you use patsy)
-# from typing import Optional
+from typing import Optional
 import statsmodels.formula.api as smf
 from abc import ABC, abstractmethod
 import inspect
@@ -366,10 +366,10 @@ class te_model_fitter(ABC):
         """Method to fit weights model - should be implemented by subclasses"""
         pass
 
-    @abstractmethod
-    def predict(self):
-        """Method to make predictions - should be implemented by subclasses"""
-        pass
+    # @abstractmethod
+    # def predict(self):
+    #     """Method to make predictions - should be implemented by subclasses"""
+    #     pass
 
 class te_weights_fitted:
     """Class to store fitted weights model results."""
@@ -401,7 +401,129 @@ class te_weights_fitted:
 
     def __repr__(self):
         return f"TEWeightsFitted(label='{self.label}', summary_keys={list(self.summary.keys())})"
-        
+
+class te_outcome_fitted:
+    def __init__(self, model=None, summary=None):
+        self.model = model if model is not None else []
+        self.summary = summary if summary is not None else {}
+
+    def show(self):
+        if self.summary:
+            print("Model Summary:\n")
+            if "tidy" in self.summary:
+                tidy_df = pd.DataFrame(self.summary["tidy"])
+                print(tidy_df.round(2).to_string(index=False))  # Round to 2 decimals
+
+            if "glance" in self.summary:
+                print("\n")
+                glance_df = pd.DataFrame(self.summary["glance"])
+                print(glance_df.round(3).to_string(index=False))  # Round to 3 decimals
+        else:
+            print("Use fit_msm() to fit the outcome model")
+            
+class te_stats_glm_logit_outcome_fitted(te_outcome_fitted):
+    """Class to store fitted outcome model results from TEStatsGLMLogit."""
+    def __init__(self, model: dict, summary: dict):
+        """
+        Args:
+            model (dict): Dictionary with 'model' (fitted GLM) and 'vcov' (covariance matrix).
+            summary (dict): Summary with 'tidy', 'glance', and optionally 'save_path' keys.
+        """
+        super().__init__(model=model, summary=summary)
+
+    def predict(self, newdata: pd.DataFrame, predict_times: list, conf_int: bool = True, 
+                samples: int = 100, type: str = "cum_inc") -> dict:
+        """
+        Predict from the fitted outcome model.
+
+        Args:
+            newdata (pd.DataFrame): Data for prediction.
+            predict_times (list): List of time points for prediction.
+            conf_int (bool): Whether to compute 95% confidence intervals. Defaults to True.
+            samples (int): Number of Monte Carlo samples for CIs. Defaults to 100.
+            type (str): Prediction type ("cum_inc" or "survival"). Defaults to "cum_inc".
+
+        Returns:
+            dict: Dictionary with prediction DataFrames for treatment 0, 1, and difference.
+        """
+        if type not in ["cum_inc", "survival"]:
+            raise ValueError("type must be 'cum_inc' or 'survival'")
+        if not all(isinstance(t, (int, float)) and t >= 0 for t in predict_times):
+            raise ValueError("predict_times must be non-negative numbers")
+        if not isinstance(conf_int, bool):
+            raise ValueError("conf_int must be a boolean")
+        if not isinstance(samples, int) or samples < 1:
+            raise ValueError("samples must be a positive integer")
+
+        # Extract fitted model
+        model = self.model["model"]
+        vcov = self.model["vcov"]
+        coefs = model.params.values
+
+        # Monte Carlo sampling for coefficients
+        coefs_mat = np.array([coefs])
+        if conf_int:
+            if vcov.shape != (len(coefs), len(coefs)):
+                raise ValueError("vcov matrix dimensions do not match coefficients")
+            sampled_coefs = np.random.multivariate_normal(mean=coefs, cov=vcov, size=samples)
+            coefs_mat = np.vstack([coefs_mat, sampled_coefs])
+
+        # Prepare newdata
+        required_cols = set(model.params.index) - {"Intercept"}
+        if not required_cols.issubset(newdata.columns):
+            raise ValueError(f"newdata must contain columns: {required_cols}")
+
+        # Prediction functions
+        def calculate_survival(data, coefs, times):
+            X = sm.add_constant(data[list(required_cols)])
+            lin_pred = np.dot(X, coefs)
+            return 1 / (1 + np.exp(lin_pred))  # Survival probability
+
+        def calculate_cum_inc(data, coefs, times):
+            X = sm.add_constant(data[list(required_cols)])
+            lin_pred = np.dot(X, coefs)
+            return 1 - (1 / (1 + np.exp(lin_pred)))  # Cumulative incidence
+
+        pred_fun = calculate_survival if type == "survival" else calculate_cum_inc
+
+        # Predictions for treatment values 0 and 1
+        pred_list = {}
+        for treatment_val, label in [(0, "assigned_treatment_0"), (1, "assigned_treatment_1")]:
+            pred_data = newdata.copy()
+            pred_data["treatment"] = treatment_val
+            pred_matrix = np.zeros((len(predict_times), len(coefs_mat)))
+            for i, time in enumerate(predict_times):
+                pred_data["followup_time"] = time  # Adjust if your model uses a different time var
+                pred_matrix[i, :] = pred_fun(pred_data, coefs_mat.T)
+            pred_list[label] = pred_matrix.T
+
+        # Compute difference
+        pred_list["difference"] = pred_list["assigned_treatment_1"] - pred_list["assigned_treatment_0"]
+
+        # Format output
+        result = {}
+        col_names = {
+            "assigned_treatment_0": f"{type}",
+            "assigned_treatment_1": f"{type}",
+            "difference": f"{type}_diff"
+        }
+        for key, pred_matrix in pred_list.items():
+            if conf_int:
+                quantiles = np.percentile(pred_matrix, [2.5, 97.5], axis=0)
+                df = pd.DataFrame({
+                    "followup_time": predict_times,
+                    col_names[key]: pred_matrix[0, :],
+                    "2.5%": quantiles[0, :],
+                    "97.5%": quantiles[1, :]
+                })
+            else:
+                df = pd.DataFrame({
+                    "followup_time": predict_times,
+                    col_names[key]: pred_matrix[0, :]
+                })
+            result[key] = df
+
+        return result
 
 class te_stats_glm_logit(te_model_fitter):
     """A model fitter using logistic regression from statsmodels."""
@@ -409,7 +531,7 @@ class te_stats_glm_logit(te_model_fitter):
         super().__init__(save_path=save_path)
         self.fitted_models = {}  # Store fitted models. change this line of code to be consistent with the docs
 
-    def fit_weights_model(self, data: pd.DataFrame, formula: str, label: str) -> TEWeightsFitted:
+    def fit_weights_model(self, data: pd.DataFrame, formula: str, label: str) -> te_weights_fitted:
         """
         Fit a logistic regression model for weights.
 
@@ -459,15 +581,47 @@ class te_stats_glm_logit(te_model_fitter):
 
         return te_weights_fitted(label=label, summary=summary, fitted=fitted_values)
 
-    def fit_outcome_model(self): # change this method code
-        """Not implemented for switch weights; included for abstract compliance."""
-        raise NotImplementedError("fit_outcome_model not supported for TEStatsGLMLogit")
+    def fit_outcome_model(self, data: pd.DataFrame, formula: str, weights=None) -> te_stats_glm_logit_outcome_fitted:
+        data = data.copy()
+        data["weights"] = 1.0 if weights is None else weights
+        model = sm.GLM.from_formula(formula, data=data, family=sm.families.Binomial())
+        result = model.fit(cov_type="cluster", cov_kwds={"groups": data["id"]})
+        save_file = ""
+        if self.save_path:
+            os.makedirs(self.save_path, exist_ok=True)
+            save_file = tempfile.mktemp(prefix="model_", dir=self.save_path, suffix=".pkl")
+            result.save(save_file)
+        vcov = result.cov_params()
+        model_dict = {"model": result, "vcov": vcov}
+        tidy_df = pd.DataFrame({
+            "term": result.params.index,
+            "estimate": result.params.values,
+            "std.error": result.bse.values,
+            "statistic": result.tvalues.values,
+            "p.value": result.pvalues.values,
+            "conf.low": result.conf_int()[0],
+            "conf.high": result.conf_int()[1]
+        })
+        glance_df = pd.DataFrame({
+            "AIC": [result.aic],
+            "BIC": [result.bic_llf],
+            "logLik": [result.llf],
+            "deviance": [result.deviance],
+            "df.resid": [int(result.df_resid)]
+        }, index=[0])
+        summary = {
+            "tidy": tidy_df.to_dict(orient="records"),
+            "glance": glance_df.to_dict(orient="records")
+        }
+        if self.save_path:
+            summary["save_path"] = pd.DataFrame({"save": [save_file]}).to_dict(orient="records")
+        return te_stats_glm_logit_outcome_fitted(model=model_dict, summary=summary)
 
-    def predict(self, data: pd.DataFrame, formula: str): # change this method code
-        """Predict using the fitted model."""
-        if formula not in self.fitted_models:
-            raise ValueError(f"No fitted model for formula: {formula}")
-        return self.fitted_models[formula].predict(data)
+    # def predict(self, data: pd.DataFrame, formula: str): # change this method code
+    #     """Predict using the fitted model."""
+    #     if formula not in self.fitted_models:
+    #         raise ValueError(f"No fitted model for formula: {formula}")
+    #     return self.fitted_models[formula].predict(data)
 
 def stats_glm_logit(save_path: str = "") -> te_stats_glm_logit:
     """
@@ -534,26 +688,7 @@ class te_weights_unset(te_weights_spec):
 
     def show(self):
         print(" - No weight model specified")
-
-class te_outcome_fitted:
-    def __init__(self, model=None, summary=None):
-        self.model = model if model is not None else []
-        self.summary = summary if summary is not None else {}
-
-    def show(self):
-        if self.summary:
-            print("Model Summary:\n")
-            if "tidy" in self.summary:
-                tidy_df = pd.DataFrame(self.summary["tidy"])
-                print(tidy_df.round(2).to_string(index=False))  # Round to 2 decimals
-
-            if "glance" in self.summary:
-                print("\n")
-                glance_df = pd.DataFrame(self.summary["glance"])
-                print(glance_df.round(3).to_string(index=False))  # Round to 3 decimals
-        else:
-            print("Use fit_msm() to fit the outcome model")
-            
+        
 
 class te_outcome_model:
     def __init__(self, formula, adjustment_vars, treatment_var, 
@@ -639,6 +774,7 @@ class TrialSequence:
 
         return self
 
+    
     def set_switch_weight_model(self, numerator=None, denominator=None, model_fitter=None, eligible_wts_0=None, eligible_wts_1=None):
         """
         Set the switch weight model for a TrialSequence object.
@@ -695,7 +831,7 @@ class TrialSequence:
         # Ensure model_fitter is provided and valid
         if model_fitter is None:
             raise ValueError("model_fitter must be provided (e.g., stats_glm_logit())")
-        if not isinstance(model_fitter, TEModelFitter):
+        if not isinstance(model_fitter, te_model_fitter):
             raise ValueError("model_fitter must be an instance of TEModelFitter")
     
         # Set switch_weights
@@ -749,6 +885,124 @@ class TrialSequence:
     #         f"Treatment={self.treatment_col}, Outcome={self.outcome_col}, Eligible={self.eligible_col}, "
     #         f"CensorAtSwitch={self.censor_at_switch})"
     #     )
+
+def get_stabilised_weights_terms(object: TrialSequence) -> str:
+    """
+    Get the stabilized weights terms for a TrialSequence object.
+    
+    Args:
+        object (TrialSequence): The trial sequence object.
+    
+    Returns:
+        str: Formula string representing stabilized weights terms.
+    
+    Raises:
+        ValueError: If object is not a TrialSequence instance.
+    """
+    # Validate object
+    if not isinstance(object, TrialSequence):
+        raise ValueError("object must be a TrialSequence instance")
+
+    # Start with base formula
+    stabilised_terms = "~1"
+
+    # Check censor_weights
+    if hasattr(object, "censor_weights"):
+        if not isinstance(object.censor_weights, te_weights_unset):
+            stabilised_terms = add_rhs(stabilised_terms, object.censor_weights.numerator)
+
+    # Check switch_weights
+    if hasattr(object, "switch_weights"):
+        if not isinstance(object.switch_weights, te_weights_unset):
+            stabilised_terms = add_rhs(stabilised_terms, object.switch_weights.numerator)
+
+    return stabilised_terms
+
+def add_rhs(formula1: str, formula2: str) -> str:
+    """
+    Combine two formula right-hand sides, removing leading '~' and avoiding duplication.
+    
+    Args:
+        formula1 (str): First formula (e.g., "~x1").
+        formula2 (str): Second formula (e.g., "~x2").
+    
+    Returns:
+        str: Combined formula (e.g., "~x1 + x2").
+    """
+    terms1 = formula1.strip().lstrip("~").split("+") if formula1 else []
+    terms2 = formula2.strip().lstrip("~").split("+") if formula2 else []
+    combined_terms = list(dict.fromkeys([t.strip() for t in terms1 + terms2 if t.strip()]))  # Remove duplicates
+    return "~" + " + ".join(combined_terms) if combined_terms else "~1"
+
+def all_vars(formula: str) -> list:
+    """
+    Extract all variable names from a formula's right-hand side.
+    
+    Args:
+        formula (str): Formula string (e.g., "~x1 + x2").
+    
+    Returns:
+        list: List of variable names (e.g., ["x1", "x2"]).
+    """
+    if not formula or formula == "~1":
+        return []
+    rhs = formula.split("~")[1].strip()
+    return [var.strip() for var in rhs.replace("+", " ").split() if var.strip()]
+
+def update_outcome_formula(object: TrialSequence) -> TrialSequence:
+    """
+    Update the outcome model formula in a TrialSequence object.
+    
+    Args:
+        object (TrialSequence): The trial sequence object to modify.
+    
+    Returns:
+        TrialSequence: Updated trial sequence object.
+    
+    Raises:
+        ValueError: If object is not a TrialSequence or outcome_model is unset.
+    """
+    # Validate object
+    if not isinstance(object, TrialSequence):
+        raise ValueError("object must be a TrialSequence instance")
+    # if isinstance(object.outcome_model, te_outcome_model_unset):
+    #     raise ValueError("outcome_model must be set before updating formula")
+
+    # Update stabilised weights terms
+    object.outcome_model.stabilised_weights_terms = get_stabilised_weights_terms(object)
+
+    # List of formula components
+    formula_list = [
+        "~1",  # Base formula
+        object.outcome_model.treatment_terms,
+        object.outcome_model.adjustment_terms,
+        object.outcome_model.followup_time_terms,
+        object.outcome_model.trial_period_terms,
+        object.outcome_model.stabilised_weights_terms
+    ]
+
+    # Filter out None or empty formulas
+    keep = [f for f in formula_list if f is not None and f.strip()]
+    
+    # Combine formulas
+    outcome_formula = "~1"  # Start with intercept
+    for formula in keep:
+        outcome_formula = add_rhs(outcome_formula, formula)
+    
+    # Set left-hand side to "outcome"
+    object.outcome_model.formula = f"outcome {outcome_formula}"
+
+    # Update adjustment_vars
+    adjustment_vars = set()
+    if object.outcome_model.adjustment_terms:
+        adjustment_vars.update(all_vars(object.outcome_model.adjustment_terms))
+    if object.outcome_model.stabilised_weights_terms:
+        adjustment_vars.update(all_vars(object.outcome_model.stabilised_weights_terms))
+    object.outcome_model.adjustment_vars = list(adjustment_vars)
+
+    return object
+
+
 
 class TrialSequenceITT(TrialSequence):
     def __init__(self, expansion=None, outcome_model=None):
