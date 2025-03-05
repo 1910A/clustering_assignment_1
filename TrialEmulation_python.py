@@ -1,11 +1,11 @@
 import pandas as pd
 from IPython.display import display
 import statsmodels.api as sm
-# import os
+import os
 # import tempfile
 from patsy import dmatrix  # For formula parsing (optional, if you use patsy)
 # from typing import Optional
-# import statsmodels.formula.api as smf
+import statsmodels.formula.api as smf
 from abc import ABC, abstractmethod
 import inspect
 import numpy as np
@@ -469,7 +469,7 @@ class te_stats_glm_logit(te_model_fitter):
             raise ValueError(f"No fitted model for formula: {formula}")
         return self.fitted_models[formula].predict(data)
 
-def stats_glm_logit(save_path: str = "") -> TEStatsGLMLogit:
+def stats_glm_logit(save_path: str = "") -> te_stats_glm_logit:
     """
     Factory function to create a TEStatsGLMLogit instance.
 
@@ -487,7 +487,7 @@ def stats_glm_logit(save_path: str = "") -> TEStatsGLMLogit:
         if dir_path and not os.path.exists(dir_path):
             raise ValueError(f"Directory for save_path '{save_path}' does not exist")
         # In R, assert_path_for_output allows overwrite; we'll assume overwriting is fine
-    return TEStatsGLMLogit(save_path=save_path)
+    return te_stats_glm_logit(save_path=save_path)
 
 
 class te_weights_spec:
