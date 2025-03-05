@@ -736,6 +736,7 @@ class TrialSequence:
         self.expansion = te_expansion_unset() if expansion is None else expansion
         self.outcome_model = te_outcome_model_unset() if outcome_model is None else outcome_model
         self.censor_weights = te_weights_unset()  # Will be set later
+        self.switch_weights = None
         self.outcome_data = None
 
     def set_data(self, data, censor_at_switch, ID = "id", period = "period", treatment = "treatment", 
@@ -849,6 +850,51 @@ class TrialSequence:
         self = update_outcome_formula(self)
         return self
 
+    def set_censor_weight_model(self, censor_event=None, numerator=None, denominator=None, pool_models="none", model_fitter=None):
+        if isinstance(self.data, te_data_unset):
+            raise ValueError("Please use set_data() before setting censor weight models")
+    
+        df = self.data.data
+        cols = set(df.columns)
+    
+        if censor_event is None or censor_event not in cols:
+            raise ValueError(f"Column '{censor_event}' not found in data")
+    
+        # Default formulas
+        numerator = f"1 - {censor_event} ~ x2" if numerator is None else numerator
+        denominator = f"1 - {censor_event} ~ x2 + x1" if denominator is None else denominator
+    
+        if not isinstance(numerator, str) or not isinstance(denominator, str):
+            raise ValueError("Numerator and denominator must be formula strings (e.g., '~x2')")
+        if "time_on_regime" in rhs_vars(numerator):
+            raise ValueError("time_on_regime should not be used in numerator")
+        numerator = update_formula(numerator)
+        denominator = update_formula(denominator)
+    
+        if model_fitter is None:
+            raise ValueError("model_fitter must be provided (e.g., stats_glm_logit())")
+        if not isinstance(model_fitter, te_model_fitter):
+            raise ValueError("model_fitter must be an instance of TEModelFitter")
+    
+        # Pooling behavior
+        pool_numerator = pool_models == "numerator"
+        pool_denominator = pool_models == "denominator"
+    
+        self.censor_weights = te_weights_spec(
+            numerator=numerator,
+            denominator=denominator,
+            pool_numerator=pool_numerator,
+            pool_denominator=pool_denominator,
+            model_fitter=model_fitter,
+            fitted=None,
+            data_subset_expr=None
+        )
+    
+        self = update_outcome_formula(self)
+        return self
+
+
+
     def show(self):
         print("Trial Sequence Object")    
         print(f"Estimand: {self.estimand}")
@@ -907,12 +953,12 @@ def get_stabilised_weights_terms(object: TrialSequence) -> str:
     stabilised_terms = "~1"
 
     # Check censor_weights
-    if hasattr(object, "censor_weights"):
+    if hasattr(object, "censor_weights") and object.censor_weights is not None:
         if not isinstance(object.censor_weights, te_weights_unset):
             stabilised_terms = add_rhs(stabilised_terms, object.censor_weights.numerator)
 
     # Check switch_weights
-    if hasattr(object, "switch_weights"):
+    if hasattr(object, "switch_weights") and object.switch_weights is not None:  # Ensure switch_weights is not None
         if not isinstance(object.switch_weights, te_weights_unset):
             stabilised_terms = add_rhs(stabilised_terms, object.switch_weights.numerator)
 
