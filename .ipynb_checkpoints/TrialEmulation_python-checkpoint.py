@@ -1,9 +1,9 @@
 import pandas as pd
 from IPython.display import display
-# import statsmodels.api as sm
+import statsmodels.api as sm
 # import os
 # import tempfile
-# import patsy
+from patsy import dmatrix  # For formula parsing (optional, if you use patsy)
 # from typing import Optional
 # import statsmodels.formula.api as smf
 from abc import ABC, abstractmethod
@@ -201,6 +201,39 @@ def censor_func(sw_data: pd.DataFrame) -> pd.DataFrame:
     sw_data["delete"] = (sw_data["eligible0_sw"] == 0) & (sw_data["eligible1_sw"] == 0)
     return sw_data
 
+# Helper functions (unchanged from previous)
+def update_formula(formula, base="treatment ~ ."):
+    if formula.startswith("~"):
+        formula = formula[1:]
+    return f"treatment ~ {formula}"
+
+def rhs_vars(formula):
+    if "~" not in formula:
+        return []
+    rhs = formula.split("~")[1].strip()
+    return [var.strip() for var in rhs.replace("+", " ").split() if var.strip()]
+
+# class StatsGLMLogit(te_model_fitter): # look for its R code in the TrialEmulation package docs because we need to revise this
+#     """A simple model fitter for logistic regression using statsmodels."""
+#     def __init__(self, save_path=""):
+#         super().__init__(save_path=save_path)
+#         self.fitted_models = {}
+
+#     def fit_weights_model(self, data, formula):
+#         """Fit a logistic regression model for weights."""
+#         model = sm.GLM.from_formula(formula, data=data, family=sm.families.Binomial())
+#         result = model.fit()
+#         self.fitted_models[formula] = result
+#         return result
+
+#     def fit_outcome_model(self):
+#         pass  # Not used here, but required by abstract base class
+
+#     def predict(self, data, formula):
+#         if formula in self.fitted_models:
+#             return self.fitted_models[formula].predict(data)
+#         raise ValueError("Model not fitted for this formula")
+
 class TEOutcomeData: # this is the te_outcome_data class in the R TrialEmulation package docs
     REQUIRED_COLUMNS = {"id", "trial_period", "followup_time", "outcome", "weight"}
     
@@ -337,6 +370,125 @@ class te_model_fitter(ABC):
     def predict(self):
         """Method to make predictions - should be implemented by subclasses"""
         pass
+
+class te_weights_fitted:
+    """Class to store fitted weights model results."""
+    def __init__(self, label: str, summary: dict, fitted: pd.Series):
+        """
+        Args:
+            label (str): A short description of the model.
+            summary (dict): Model summary with 'tidy', 'glance', and 'save_path' keys,
+                           each containing a list of dicts (from DataFrame.to_dict('records')).
+            fitted (pd.Series): Fitted values from the model.
+        """
+        self.label = label
+        self.summary = summary
+        self.fitted = fitted
+
+    def show(self):
+        """Display the fitted weights model details."""
+        print(f"Model: {self.label}\n")
+        for key in self.summary:
+            # Convert list of dicts back to DataFrame for display
+            df = pd.DataFrame(self.summary[key])
+            if not df.empty:
+                # Round numbers for cleaner output, similar to R's print.data.frame
+                numeric_cols = df.select_dtypes(include=['float64']).columns
+                df[numeric_cols] = df[numeric_cols].round(4)
+                print(f"{key.capitalize()} summary:")
+                display(df)  # Or use print(df.to_string(index=False)) for plain text
+                print("")
+
+    def __repr__(self):
+        return f"TEWeightsFitted(label='{self.label}', summary_keys={list(self.summary.keys())})"
+        
+
+class te_stats_glm_logit(te_model_fitter):
+    """A model fitter using logistic regression from statsmodels."""
+    def __init__(self, save_path: str = ""):
+        super().__init__(save_path=save_path)
+        self.fitted_models = {}  # Store fitted models. change this line of code to be consistent with the docs
+
+    def fit_weights_model(self, data: pd.DataFrame, formula: str, label: str) -> TEWeightsFitted:
+        """
+        Fit a logistic regression model for weights.
+
+        Args:
+            data (pd.DataFrame): Data to fit the model on.
+            formula (str): Model formula (e.g., "treatment ~ age + x1").
+            label (str): Identifier for the model.
+
+        Returns:
+            TEWeightsFitted: Object containing model results and fitted values.
+        """
+        # Fit the logistic regression model
+        model = sm.GLM.from_formula(formula, data=data, family=sm.families.Binomial())
+        result = model.fit()
+
+        # Save the model if save_path is specified
+        save_file = ""
+        if self.save_path:
+            os.makedirs(self.save_path, exist_ok=True)
+            save_file = tempfile.mktemp(prefix="model_", dir=self.save_path, suffix=".pkl")
+            result.save(save_file)
+
+        # Prepare summary
+        tidy_df = pd.DataFrame({
+            "term": result.params.index,
+            "estimate": result.params.values,
+            "std.error": result.bse.values,
+            "statistic": result.tvalues.values,
+            "p.value": result.pvalues.values
+        })
+        glance_df = pd.DataFrame({
+            "AIC": [result.aic],
+            "BIC": [result.bic_llf],
+            "logLik": [result.llf],
+            "deviance": [result.deviance],
+            "df.resid": [int(result.df_resid)]
+        }, index=[0])
+        summary = {
+            "tidy": tidy_df.to_dict(orient="records"),
+            "glance": glance_df.to_dict(orient="records"),
+            "save_path": pd.DataFrame({"path": [save_file]}).to_dict(orient="records")
+        }
+
+        # Store fitted values and model
+        fitted_values = result.fittedvalues
+        self.fitted_models[formula] = result
+
+        return te_weights_fitted(label=label, summary=summary, fitted=fitted_values)
+
+    def fit_outcome_model(self): # change this method code
+        """Not implemented for switch weights; included for abstract compliance."""
+        raise NotImplementedError("fit_outcome_model not supported for TEStatsGLMLogit")
+
+    def predict(self, data: pd.DataFrame, formula: str): # change this method code
+        """Predict using the fitted model."""
+        if formula not in self.fitted_models:
+            raise ValueError(f"No fitted model for formula: {formula}")
+        return self.fitted_models[formula].predict(data)
+
+def stats_glm_logit(save_path: str = "") -> TEStatsGLMLogit:
+    """
+    Factory function to create a TEStatsGLMLogit instance.
+
+    Args:
+        save_path (str, optional): Path to save fitted models. Defaults to "" (no saving).
+
+    Returns:
+        TEStatsGLMLogit: An instance of the model fitter.
+
+    Raises:
+        ValueError: If save_path is invalid and not empty.
+    """
+    if save_path:  # Not empty
+        dir_path = os.path.dirname(save_path)
+        if dir_path and not os.path.exists(dir_path):
+            raise ValueError(f"Directory for save_path '{save_path}' does not exist")
+        # In R, assert_path_for_output allows overwrite; we'll assume overwriting is fine
+    return TEStatsGLMLogit(save_path=save_path)
+
 
 class te_weights_spec:
     def __init__(self, numerator, denominator, pool_numerator, pool_denominator, model_fitter, fitted, data_subset_expr):
@@ -487,7 +639,79 @@ class TrialSequence:
 
         return self
 
-    #def set_switch_weight_model():
+    def set_switch_weight_model(self, numerator=None, denominator=None, model_fitter=None, eligible_wts_0=None, eligible_wts_1=None):
+        """
+        Set the switch weight model for a TrialSequence object.
+    
+        Args:
+            object (TrialSequence): The trial sequence object to modify.
+            numerator (str, optional): Formula for numerator (e.g., "~age"). Defaults to "~1".
+            denominator (str, optional): Formula for denominator (e.g., "~age + x1"). Defaults to "~1".
+            model_fitter (TEModelFitter): Object to fit the weight model (e.g., from stats_glm_logit).
+            eligible_wts_0 (str, optional): Column name for eligibility weights (treatment 0).
+            eligible_wts_1 (str, optional): Column name for eligibility weights (treatment 1).
+    
+        Returns:
+            TrialSequence: Updated trial sequence object.
+    
+        Raises:
+            ValueError: If data is unset, formulas are invalid, or required columns are missing.
+        """
+        # Check if data is set
+        if isinstance(self.data, te_data_unset):
+            raise ValueError("Please use set_data() to set up the data before setting switch weight models")
+    
+        # Check if switch weights are supported
+        if isinstance(self, TrialSequenceITT):
+            raise ValueError("Switching weights are not supported for intention-to-treat (ITT) analyses")
+    
+        # Access the pandas DataFrame
+        df = self.data.data  # This is a pandas DataFrame
+        cols = set(df.columns)
+    
+        # Handle eligible_wts_0 and eligible_wts_1 renaming
+        if eligible_wts_0 is not None:
+            if eligible_wts_0 not in cols:
+                raise ValueError(f"Column '{eligible_wts_0}' not found in data")
+            df = df.rename(columns={eligible_wts_0: "eligible_wts_0"})
+        if eligible_wts_1 is not None:
+            if eligible_wts_1 not in cols:
+                raise ValueError(f"Column '{eligible_wts_1}' not found in data")
+            df = df.rename(columns={eligible_wts_1: "eligible_wts_1"})
+        self.data.data = df  # Update the DataFrame
+    
+        # Default formulas
+        numerator = "~1" if numerator is None else numerator
+        denominator = "~1" if denominator is None else denominator
+    
+        # Validate and update formulas
+        if not isinstance(numerator, str) or not isinstance(denominator, str):
+            raise ValueError("numerator and denominator must be formula strings (e.g., '~age')")
+        if "time_on_regime" in rhs_vars(numerator):
+            raise ValueError("time_on_regime should not be used in numerator")
+        numerator = update_formula(numerator)
+        denominator = update_formula(denominator)
+    
+        # Ensure model_fitter is provided and valid
+        if model_fitter is None:
+            raise ValueError("model_fitter must be provided (e.g., stats_glm_logit())")
+        if not isinstance(model_fitter, TEModelFitter):
+            raise ValueError("model_fitter must be an instance of TEModelFitter")
+    
+        # Set switch_weights
+        self.switch_weights = te_weights_spec(
+            numerator=numerator,
+            denominator=denominator,
+            pool_numerator=False,
+            pool_denominator=False,
+            model_fitter=model_fitter,
+            fitted=None,
+            data_subset_expr=None
+        )
+    
+        # Update outcome formula (placeholder)
+        self = update_outcome_formula(self)
+        return self
 
     def show(self):
         print("Trial Sequence Object")    
