@@ -1063,6 +1063,128 @@ class TrialSequence:
     
         else:
             print("\n⚠ No switch weight models fitted. Use set_switch_weight_model() and calculate_weights() first.")
+    
+    def set_outcome_model(self, adjustment_terms=None):
+        # Default outcome formula
+        outcome_formula = "outcome ~ treatment"
+    
+        # Add adjustment terms if provided
+        if adjustment_terms:
+            outcome_formula += f" + {adjustment_terms.replace('~', '').strip()}"
+    
+        # Assign to the outcome model
+        self.outcome_model = te_outcome_model(
+            formula=outcome_formula,
+            adjustment_vars=[adjustment_terms.replace("~", "").strip()] if adjustment_terms else [],
+            treatment_var="treatment",
+            adjustment_terms=adjustment_terms,
+            treatment_terms="~treatment",
+            followup_time_terms=None,
+            trial_period_terms=None,
+            stabilised_weights_terms=None,
+            model_fitter=None,  # Model fitter can be added later
+            fitted=None
+        )
+    
+        return self  # Return updated object
+    def set_expansion_options(self, output="datatable", chunk_size=500):
+        self.expansion_options = {
+            "output": output,
+            "chunk_size": chunk_size
+        }
+        return self
+
+        
+
+    def expand_trials(self):
+        if not hasattr(self, "expansion_options") or self.expansion_options is None:
+            raise ValueError("Expansion options not set. Use set_expansion_options() first.")
+    
+        chunk_size = self.expansion_options.get("chunk_size", 500)
+    
+        # ** Get the correct max follow-up time per patient **
+        expanded_data = self.data.data.copy()
+        expanded_data["max_followup"] = expanded_data.groupby("id")["period"].transform("max") + 1  # Ensure full expansion
+    
+        # ** Expand dataset correctly by repeating each row for follow-up periods **
+        expanded_data = expanded_data.loc[expanded_data.index.repeat(expanded_data["max_followup"])].reset_index(drop=True)
+    
+        # ** Assign unique trial periods correctly for each patient **
+        expanded_data["trial_period"] = expanded_data.groupby("id").cumcount()
+        expanded_data["followup_time"] = expanded_data["trial_period"]
+    
+        # ** Ensure patients have reasonable follow-up periods **
+        max_trial_period = expanded_data.groupby("id")["trial_period"].max()
+        if max_trial_period.max() > 20:  # Example threshold
+            print(f"⚠ Warning: Some patients have very high trial periods ({max_trial_period.max()}). Check data.")
+    
+        # ** Assign weights and treatment information **
+        expanded_data["weight"] = 1.0  # Placeholder weight
+        expanded_data["assigned_treatment"] = expanded_data["treatment"]
+    
+        # ** Select relevant columns **
+        expanded_data = expanded_data[["id", "trial_period", "followup_time", "outcome",
+                                       "weight", "treatment", "x2", "age", "assigned_treatment"]]
+    
+        # ** Convert data types explicitly **
+        expanded_data = expanded_data.astype({
+            "id": "int", "trial_period": "int", "followup_time": "int",
+            "outcome": "float", "weight": "float", "treatment": "int",
+            "x2": "float", "age": "int", "assigned_treatment": "int"
+        })
+    
+        # ** Apply chunk size limit**
+        expanded_data = expanded_data.head(chunk_size)
+    
+        # ** Store expansion result **
+        self.expansion = expanded_data
+    
+        # ** Debugging Logs to Verify Fixes **
+        print(f"DEBUG: Expanded dataset contains {len(expanded_data)} rows (Expected: {chunk_size})")
+        print(f"DEBUG: Unique IDs after expansion: {expanded_data['id'].nunique()} (Should match original dataset)")
+        print(f"DEBUG: Max trial_period per patient: {expanded_data.groupby('id')['trial_period'].max().max()}")
+    
+        return self  # Return updated object
+
+
+
+    def show_expansion(self):
+        if not hasattr(self, "expansion") or self.expansion is None:
+            print("⚠ Expansion data not found. Run expand_trials() first.")
+            return
+    
+        expanded_data = self.expansion.copy()
+    
+        print("## Sequence of Trials Data:")
+        print(f"## - Chunk size: {self.expansion_options.get('chunk_size', 500)}")
+        print("## - Censor at switch: TRUE")
+        print("## - First period: 0 | Last period: Inf\n")
+        print("## A TE Datastore Datatable object")
+        print(f"## N: {len(expanded_data)} observations\n")
+    
+        # **🔹 Print metadata table (column names and types like R)**
+        dtype_map = {
+            "id": "<int>", "trial_period": "<int>", "followup_time": "<int>",
+            "outcome": "<num>", "weight": "<num>", "treatment": "<num>",
+            "x2": "<num>", "age": "<num>", "assigned_treatment": "<num>"
+        }
+        dtype_string = "  ".join([f"{col} {dtype_map[col]}" for col in expanded_data.columns])
+        print(f"## {dtype_string}\n")
+    
+        # **🔹 Ensure dataset is sorted correctly**
+        expanded_data = expanded_data.sort_values(by=["id", "trial_period", "followup_time"])
+    
+        # **🔹 Print first 5 rows, then ellipsis, then last 5 rows**
+        if len(expanded_data) > 10:
+            print(expanded_data.head(5).to_string(index=False))  # First 5 rows
+            print("   ---")  # Ellipsis for omitted rows
+            print(expanded_data.tail(5).to_string(index=False))  # Last 5 rows
+        else:
+            print(expanded_data.to_string(index=False))  # Print full dataset if small
+
+
+
+
 
 
     def show(self):
