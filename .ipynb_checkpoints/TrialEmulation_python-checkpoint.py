@@ -1146,6 +1146,28 @@ class TrialSequence:
     
         return self  # Return updated object
 
+    def load_expanded_data(self, seed=1234, p_control=0.5):
+        # Check if expansion data is valid**
+        if not hasattr(self, "expansion") or self.expansion is None or isinstance(self.expansion, te_expansion_unset):
+            raise ValueError("⚠ No expansion data found. Use expand_trials() first.")
+    
+        np.random.seed(seed)  # Set seed for reproducibility
+    
+        # Convert expansion to DataFrame if necessary**
+        if not isinstance(self.expansion, pd.DataFrame):
+            raise TypeError("⚠ Expansion data is not a valid DataFrame. Check expand_trials().")
+    
+        expanded_data = self.expansion.copy()  # Copy expanded dataset
+    
+        # Randomly assign treatment based on probability**
+        expanded_data["assigned_treatment"] = np.random.choice(
+            [0, 1], size=len(expanded_data), p=[p_control, 1 - p_control]
+        )
+    
+        # Store modified expansion data**
+        self.expansion = expanded_data
+    
+        return self  # Return updated object
 
 
     def show_expansion(self):
