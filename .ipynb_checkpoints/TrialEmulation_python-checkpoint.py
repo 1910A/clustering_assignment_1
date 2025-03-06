@@ -9,6 +9,7 @@ import statsmodels.formula.api as smf
 from abc import ABC, abstractmethod
 import inspect
 import numpy as np
+import pickle
 
 # Trial sequence class and function definitions
 def trial_sequence(estimand, **kwargs):
@@ -730,7 +731,7 @@ class te_outcome_model_unset(te_outcome_model):
         print(" - Outcome model not specified. Use set_outcome_model()")
 
 class TrialSequence:
-    def __init__(self, estimand, expansion=None, outcome_model=None):
+    def __init__(self, estimand, save_path=None, expansion=None, outcome_model=None):
         self.data = te_data_unset() # class te_data
         self.estimand = estimand
         self.expansion = te_expansion_unset() if expansion is None else expansion
@@ -738,6 +739,11 @@ class TrialSequence:
         self.censor_weights = te_weights_unset()  # Will be set later
         self.switch_weights = None
         self.outcome_data = None
+        if save_path is None:
+            save_path = os.path.join(os.getcwd(), f"{estimand.lower()}_models")
+            os.makedirs(save_path, exist_ok=True)  # Create directory if it doesn't exist
+        
+        self.save_path = save_path
 
     def set_data(self, data, censor_at_switch, ID = "id", period = "period", treatment = "treatment", 
                  outcome = "outcome", eligible = "eligible"):
@@ -893,6 +899,108 @@ class TrialSequence:
         self = update_outcome_formula(self)
         return self
 
+    def calculate_weights(self, save_path):
+        if isinstance(self.data, te_data_unset):
+            raise ValueError("Please use set_data() before calculating weights.")
+    
+        df = self.data.data.copy()
+    
+        # Ensure previous_treatment exists
+        if "previous_treatment" not in df.columns:
+            df["previous_treatment"] = df.groupby("id")["treatment"].shift(1).fillna(0).astype(int)
+    
+        weight_models = {}
+    
+        # **🔹 Numerator Model (P(censor_event = 0 | X))**
+        num_formula = "censored ~ x2"
+        num_model = sm.Logit.from_formula(num_formula, data=df).fit(disp=0)
+        weight_models["numerator"] = num_model
+        df["numerator_weights"] = num_model.predict(df)
+    
+        # Save numerator model
+        num_model_path = os.path.join(save_path, "model_numerator.pkl")
+        with open(num_model_path, "wb") as f:
+            pickle.dump(num_model, f)
+    
+        # **🔹 Denominator Models (Conditioned on previous treatment)**
+        denom_weights = []
+        for prev_treatment in [0, 1]:
+            subset_df = df[df["previous_treatment"] == prev_treatment]
+    
+            if subset_df.empty:
+                print(f"⚠ Warning: No data for previous_treatment = {prev_treatment}. Skipping model fit.")
+                continue
+    
+            denom_formula = "censored ~ x2 + x1"
+            denom_model = sm.Logit.from_formula(denom_formula, data=subset_df).fit(disp=0)
+            weight_models[f"denominator_{prev_treatment}"] = denom_model
+            denom_weights.append(denom_model.predict(subset_df))
+    
+            # Save denominator model
+            denom_model_path = os.path.join(save_path, f"model_denominator_{prev_treatment}.pkl")
+            with open(denom_model_path, "wb") as f:
+                pickle.dump(denom_model, f)
+    
+        # **🔹 Assign weights to trial object**
+        self.censor_weights = te_weights_spec(
+            numerator=num_formula,
+            denominator=denom_formula,
+            pool_numerator=True if self.estimand == "ITT" else False,
+            pool_denominator=False,
+            model_fitter=te_stats_glm_logit(),  # ✅ Fixed syntax error
+            fitted=weight_models,
+            data_subset_expr=None
+        )
+    
+        return self  # Return the updated object
+
+
+    def show_weight_models(trial):
+        if not hasattr(trial, "censor_weights") or trial.censor_weights is None:
+            print("No weight models fitted. Use calculate_weights() first.")
+            return
+    
+        print("## Weight Models for Informative Censoring")
+        print("## ---------------------------------------\n")
+    
+        weight_models = trial.censor_weights.fitted
+    
+        for key, model in weight_models.items():
+            print(f"## [[{key}]]")
+            print(f"Model: P(censor_event = 0 | X{', previous treatment = 0' if key == 'denominator_0' else ', previous treatment = 1' if key == 'denominator_1' else ''})\n")
+    
+            # Extract coefficient table
+            results_df = model.summary2().tables[1]
+    
+            # **Insert "term" column as first column**
+            terms = model.model.exog_names  # Get variable names
+            results_df.insert(0, "term", terms)
+    
+            # **Print formatted table**
+            print(results_df.to_string(index=False))  
+            print("\n")
+    
+            # Extract model statistics
+            null_deviance = model.llnull * -2
+            df_null = model.nobs - 1
+            logLik = model.llf
+            aic = model.aic
+            bic = model.bic
+            deviance = model.deviance if hasattr(model, "deviance") else (model.llf * -2)
+            df_residual = model.df_resid
+            nobs = model.nobs
+    
+            # **Print model statistics**
+            print(" null.deviance df.null logLik    AIC      BIC      deviance df.residual nobs")
+            print(f" {null_deviance:.4f}      {df_null}     {logLik:.4f} {aic:.4f} {bic:.4f} {deviance:.4f} {df_residual}         {nobs} \n")
+    
+            # **Print model save path**
+            if trial.save_path is not None:
+                model_path = os.path.join(trial.save_path, f"model_{key}.pkl")
+                print(f" path\n {model_path}\n")
+            else:
+                print(f"⚠ Warning: No save path provided for {key}. Model not saved.\n")
+
 
 
     def show(self):
@@ -963,6 +1071,7 @@ def get_stabilised_weights_terms(object: TrialSequence) -> str:
             stabilised_terms = add_rhs(stabilised_terms, object.switch_weights.numerator)
 
     return stabilised_terms
+
 
 def add_rhs(formula1: str, formula2: str) -> str:
     """
