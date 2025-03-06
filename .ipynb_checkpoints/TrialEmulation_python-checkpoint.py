@@ -911,7 +911,7 @@ class TrialSequence:
     
         weight_models = {}
     
-        # **🔹 Numerator Model (P(censor_event = 0 | X))**
+        # Numerator Model (P(censor_event = 0 | X))
         num_formula = "censored ~ x2"
         num_model = sm.Logit.from_formula(num_formula, data=df).fit(disp=0)
         weight_models["numerator"] = num_model
@@ -922,7 +922,7 @@ class TrialSequence:
         with open(num_model_path, "wb") as f:
             pickle.dump(num_model, f)
     
-        # **🔹 Denominator Models (Conditioned on previous treatment)**
+        # Denominator Models (Conditioned on previous treatment)
         denom_weights = []
         for prev_treatment in [0, 1]:
             subset_df = df[df["previous_treatment"] == prev_treatment]
@@ -941,23 +941,48 @@ class TrialSequence:
             with open(denom_model_path, "wb") as f:
                 pickle.dump(denom_model, f)
     
-        # **🔹 Assign weights to trial object**
+        # Assign informative censoring weights
         self.censor_weights = te_weights_spec(
             numerator=num_formula,
             denominator=denom_formula,
             pool_numerator=True if self.estimand == "ITT" else False,
             pool_denominator=False,
-            model_fitter=te_stats_glm_logit(),  # ✅ Fixed syntax error
+            model_fitter=te_stats_glm_logit(),
             fitted=weight_models,
             data_subset_expr=None
         )
     
-        return self  # Return the updated object
+        # Fit switch weight models if they exist
+        if hasattr(self, "switch_weights") and self.switch_weights is not None:
+            if isinstance(self.switch_weights, te_weights_spec):
+                print("Fitting treatment switching models...")
+                self.switch_weights.fitted = {}  # Initialize fitted models
+    
+                for key in ["n0", "n1", "d0", "d1"]:
+                    formula = "treatment ~ age" if "n" in key else "treatment ~ age + x1 + x3"
+                    switch_model = sm.Logit.from_formula(formula, data=df).fit(disp=0)
+                    self.switch_weights.fitted[key] = switch_model
+    
+                    # Save model
+                    switch_model_path = os.path.join(save_path, f"model_switch_{key}.pkl")
+                    with open(switch_model_path, "wb") as f:
+                        pickle.dump(switch_model, f)
+            else:
+                print("⚠ Warning: switch_weights is not an instance of te_weights_spec. Skipping switch model fitting.")
+        else:
+            print("⚠ No switch weight model set. Use set_switch_weight_model() before calculate_weights().")
+    
+        return self  # Return updated object
 
 
     def show_weight_models(trial):
+        #Check if censor weights exist
         if not hasattr(trial, "censor_weights") or trial.censor_weights is None:
-            print("No weight models fitted. Use calculate_weights() first.")
+            print("⚠ No weight models fitted. Use calculate_weights() first.")
+            return
+        
+        if trial.censor_weights.fitted is None:
+            print("⚠ No fitted weight models found. Use calculate_weights() first.")
             return
     
         print("## Weight Models for Informative Censoring")
@@ -966,18 +991,17 @@ class TrialSequence:
         weight_models = trial.censor_weights.fitted
     
         for key, model in weight_models.items():
+            label_prefix = "P(censor_event = 0 | X)" if key == "numerator" else f"P(censor_event = 0 | X, previous treatment = {0 if 'denominator_0' in key else 1})"
+    
             print(f"## [[{key}]]")
-            print(f"Model: P(censor_event = 0 | X{', previous treatment = 0' if key == 'denominator_0' else ', previous treatment = 1' if key == 'denominator_1' else ''})\n")
+            print(f"Model: {label_prefix}\n")
     
             # Extract coefficient table
             results_df = model.summary2().tables[1]
-    
-            # **Insert "term" column as first column**
-            terms = model.model.exog_names  # Get variable names
+            terms = model.model.exog_names
             results_df.insert(0, "term", terms)
     
-            # **Print formatted table**
-            print(results_df.to_string(index=False))  
+            print(results_df.to_string(index=False))
             print("\n")
     
             # Extract model statistics
@@ -986,21 +1010,59 @@ class TrialSequence:
             logLik = model.llf
             aic = model.aic
             bic = model.bic
-            deviance = model.deviance if hasattr(model, "deviance") else (model.llf * -2)
+            deviance = getattr(model, "deviance", model.llf * -2)
             df_residual = model.df_resid
             nobs = model.nobs
     
-            # **Print model statistics**
             print(" null.deviance df.null logLik    AIC      BIC      deviance df.residual nobs")
             print(f" {null_deviance:.4f}      {df_null}     {logLik:.4f} {aic:.4f} {bic:.4f} {deviance:.4f} {df_residual}         {nobs} \n")
     
-            # **Print model save path**
-            if trial.save_path is not None:
+            # Print model save path
+            if hasattr(trial, "save_path") and trial.save_path:
                 model_path = os.path.join(trial.save_path, f"model_{key}.pkl")
                 print(f" path\n {model_path}\n")
             else:
                 print(f"⚠ Warning: No save path provided for {key}. Model not saved.\n")
-
+    
+        # Append Treatment Switching Models if available
+        if hasattr(trial, "switch_weights") and trial.switch_weights and trial.switch_weights.fitted:
+            print("\n## Weight Models for Treatment Switching")
+            print("## -------------------------------------\n")
+    
+            switch_models = trial.switch_weights.fitted
+            for key, model in switch_models.items():
+                print(f"## [[{key}]]")
+                print(f"Model: P(treatment = 1 | previous treatment = {'0' if 'n0' in key else '1'}) for {'numerator' if 'n' in key else 'denominator'}\n")
+    
+                # Extract coefficient table
+                results_df = model.summary2().tables[1]
+                terms = model.model.exog_names
+                results_df.insert(0, "term", terms)
+    
+                print(results_df.to_string(index=False))
+                print("\n")
+    
+                # Extract and print model statistics
+                null_deviance = model.llnull * -2
+                df_null = model.nobs - 1
+                logLik = model.llf
+                aic = model.aic
+                bic = model.bic
+                deviance = getattr(model, "deviance", model.llf * -2)
+                df_residual = model.df_resid
+                nobs = model.nobs
+    
+                print(" null.deviance df.null logLik    AIC      BIC      deviance df.residual nobs")
+                print(f" {null_deviance:.4f}      {df_null}     {logLik:.4f} {aic:.4f} {bic:.4f} {deviance:.4f} {df_residual}         {nobs} \n")
+    
+                if hasattr(trial, "save_path") and trial.save_path:
+                    model_path = os.path.join(trial.save_path, f"model_{key}.pkl")
+                    print(f" path\n {model_path}\n")
+                else:
+                    print(f"⚠ Warning: No save path provided for {key}. Model not saved.\n")
+    
+        else:
+            print("\n⚠ No switch weight models fitted. Use set_switch_weight_model() and calculate_weights() first.")
 
 
     def show(self):
