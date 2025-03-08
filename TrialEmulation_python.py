@@ -306,34 +306,52 @@ class te_datastore:
     def __init__(self, N: int = 0):
         self.N = N
 
+def save_to_datatable():
+    """Factory function to create an empty te_datastore_datatable, mimicking R's save_to_datatable()."""
+    return te_datastore_datatable()
+
 class te_datastore_datatable(te_datastore):
-    def __init__(self, data: pd.DataFrame):
+    def __init__(self, data: pd.DataFrame=None):
+        # Default to empty DataFrame if no data provided
+        data = pd.DataFrame() if data is None else data
+        super().__init__(N=len(data))
         self.data = data
 
     def show(self):
         print("A TE Datastore Datatable object")
         print(f"N: {self.N} observations")
-        print(self.data.head(4))  # Show first 4 rows
+        if not self.data.empty:
+            display(self.data.head(4))
+
+def save_expanded_data(datastore, switch_data):
+    """Append switch_data to the datastore, updating N."""
+    if not isinstance(datastore, te_datastore_datatable):
+        raise ValueError("datastore must be a te_datastore_datatable instance")
+    if datastore.data.empty:
+        datastore.data = switch_data
+    else:
+        datastore.data = pd.concat([datastore.data, switch_data], ignore_index=True)
+    datastore.N = len(datastore.data)
+    return datastore
         
 class te_expansion:
     def __init__(self, chunk_size, datastore, censor_at_switch, first_period, last_period):
-        self.chunk_size = 0 if chunk_size is None else chunk_size# datatype "numeric",
-        self.datastore = te_datastore() if datastore is None else datastore # datatype "te_datastore",
-        self.censor_at_switch = censor_at_switch # datatype "logical",
-        self.first_period = first_period # datatype "numeric",
-        self.last_period = last_period # datatype "numeric"
+            self.chunk_size = chunk_size if chunk_size is not None else 0
+            self.datastore = datastore if datastore is not None else save_to_datatable()
+            self.censor_at_switch = censor_at_switch
+            self.first_period = first_period if first_period is not None else 0
+            self.last_period = last_period if last_period is not None else float('inf')
 
     def show(self):
-        print("Sequence of Trials Data:")
-        print(f"- Chunk size: {self.chunk_size}")
-        print(f"- Censor at switch: {self.censor_at_switch}")
-        print(f"- First period: {self.first_period} | Last period: {self.last_period}")
-        
-        if (self.datastore.N > 0):
-          print("")
-          self.datastore.show()
-        else:
-          print("- Use expand_trials() to construct sequence of trials dataset.")
+            print("Sequence of Trials Data:")
+            print(f"- Chunk size: {self.chunk_size}")
+            print(f"- Censor at switch: {self.censor_at_switch}")
+            print(f"- First period: {self.first_period} | Last period: {self.last_period}")
+            if self.datastore.N > 0:
+                print("")
+                self.datastore.show()
+            else:
+                print("- Use expand_trials() to construct sequence of trials dataset.")
         
 class te_expansion_unset(te_expansion):
     def __init__(self):
@@ -739,11 +757,8 @@ class TrialSequence:
         self.censor_weights = te_weights_unset()  # Will be set later
         # self.switch_weights = None
         self.outcome_data = None
-        if save_path is None:
-            save_path = os.path.join(os.getcwd(), f"{estimand.lower()}_models")
-            os.makedirs(save_path, exist_ok=True)  # Create directory if it doesn't exist
-        
-        self.save_path = save_path
+        self.save_path = save_path or os.path.join(os.getcwd(), f"{estimand.lower()}_models")
+        os.makedirs(self.save_path, exist_ok=True)
 
     def set_data(self, data, censor_at_switch, ID = "id", period = "period", treatment = "treatment", 
                  outcome = "outcome", eligible = "eligible"):
@@ -1087,64 +1102,71 @@ class TrialSequence:
         )
     
         return self  # Return updated object
-    def set_expansion_options(self, output="datatable", chunk_size=500):
-        self.expansion_options = {
-            "output": output,
-            "chunk_size": chunk_size
-        }
+
+    def set_expansion_options(self, output=None, chunk_size=0, first_period=0, last_period=float('inf')):
+        if not isinstance(chunk_size, int) or chunk_size < 0:
+            raise ValueError("chunk_size must be a non-negative integer")
+        if not isinstance(first_period, (int, float)) or first_period < 0:
+            raise ValueError("first_period must be a non-negative number")
+        if not isinstance(last_period, (int, float)) or last_period < first_period:
+            raise ValueError("last_period must be >= first_period")
+        datastore = output if output is not None else save_to_datatable()
+        if not isinstance(datastore, te_datastore_datatable):
+            raise ValueError("output must be a te_datastore_datatable instance")
+        self.expansion = te_expansion(
+            chunk_size=chunk_size,
+            datastore=datastore,
+            censor_at_switch=self.estimand == "PP",
+            first_period=first_period,
+            last_period=last_period
+        )
         return self
 
         
-
     def expand_trials(self):
-        if not hasattr(self, "expansion_options") or self.expansion_options is None:
-            raise ValueError("Expansion options not set. Use set_expansion_options() first.")
-    
-        chunk_size = self.expansion_options.get("chunk_size", 500)
-    
-        # ** Get the correct max follow-up time per patient **
-        expanded_data = self.data.data.copy()
-        expanded_data["max_followup"] = expanded_data.groupby("id")["period"].transform("max") + 1  # Ensure full expansion
-    
-        # ** Expand dataset correctly by repeating each row for follow-up periods **
-        expanded_data = expanded_data.loc[expanded_data.index.repeat(expanded_data["max_followup"])].reset_index(drop=True)
-    
-        # ** Assign unique trial periods correctly for each patient **
-        expanded_data["trial_period"] = expanded_data.groupby("id").cumcount()
-        expanded_data["followup_time"] = expanded_data["trial_period"]
-    
-        # ** Ensure patients have reasonable follow-up periods **
-        max_trial_period = expanded_data.groupby("id")["trial_period"].max()
-        if max_trial_period.max() > 20:  # Example threshold
-            print(f"⚠ Warning: Some patients have very high trial periods ({max_trial_period.max()}). Check data.")
-    
-        # ** Assign weights and treatment information **
-        expanded_data["weight"] = 1.0  # Placeholder weight
-        expanded_data["assigned_treatment"] = expanded_data["treatment"]
-    
-        # ** Select relevant columns **
-        expanded_data = expanded_data[["id", "trial_period", "followup_time", "outcome",
-                                       "weight", "treatment", "x2", "age", "assigned_treatment"]]
-    
-        # ** Convert data types explicitly **
-        expanded_data = expanded_data.astype({
-            "id": "int", "trial_period": "int", "followup_time": "int",
-            "outcome": "float", "weight": "float", "treatment": "int",
-            "x2": "float", "age": "int", "assigned_treatment": "int"
-        })
-    
-        # ** Apply chunk size limit**
-        expanded_data = expanded_data.head(chunk_size)
-    
-        # ** Store expansion result **
-        self.expansion = expanded_data
-    
-        # ** Debugging Logs to Verify Fixes **
-        print(f"DEBUG: Expanded dataset contains {len(expanded_data)} rows (Expected: {chunk_size})")
-        print(f"DEBUG: Unique IDs after expansion: {expanded_data['id'].nunique()} (Should match original dataset)")
-        print(f"DEBUG: Max trial_period per patient: {expanded_data.groupby('id')['trial_period'].max().max()}")
-    
-        return self  # Return updated object
+        if isinstance(self.expansion, te_expansion_unset):
+            raise ValueError("Use set_expansion_options() before expand_trials()")
+        if isinstance(self.data, te_data_unset):
+            raise ValueError("Use set_data() before expand_trials()")
+        data = self.data.data.copy()
+        first_period = max(self.expansion.first_period, data[data["eligible"] == 1]["period"].min() if (data["eligible"] == 1).any() else 0)
+        last_period = min(self.expansion.last_period, data[data["eligible"] == 1]["period"].max() if (data["eligible"] == 1).any() else float('inf'))
+        chunk_size = self.expansion.chunk_size
+        censor_at_switch = self.expansion.censor_at_switch
+        outcome_adj_vars = self.outcome_model.adjustment_vars if hasattr(self.outcome_model, "adjustment_vars") else []
+        treatment_var = self.outcome_model.treatment_var if hasattr(self.outcome_model, "treatment_var") else "treatment"
+        keeplist = list(set(["id", "trial_period", "followup_time", "outcome", "weight", "treatment", "x2", "age", "assigned_treatment"] + outcome_adj_vars + [treatment_var]))
+        if "wt" not in data.columns:
+            data["wt"] = 1.0
+        all_ids = data["id"].unique()
+        if chunk_size == 0:
+            id_chunks = [all_ids]
+        else:
+            id_chunks = [all_ids[i:i + chunk_size] for i in range(0, len(all_ids), chunk_size)]
+        for ids in id_chunks:
+            subset_data = data[data["id"].isin(ids)].copy()
+            expanded_data = self._expand_subset(subset_data, first_period, last_period, censor_at_switch, keeplist)
+            self.expansion.datastore = save_expanded_data(self.expansion.datastore, expanded_data)
+        return self
+
+    def _expand_subset(self, sw_data, first_period, last_period, censor_at_switch, keeplist):
+        expanded = []
+        for id_ in sw_data["id"].unique():
+            id_data = sw_data[sw_data["id"] == id_].sort_values("period")
+            periods = range(int(first_period), int(min(last_period, id_data["period"].max() + 1)))
+            for trial_period in periods:
+                period_data = id_data[id_data["period"] <= trial_period].iloc[-1].copy()
+                period_data["trial_period"] = trial_period
+                period_data["followup_time"] = trial_period - id_data["period"].min()
+                period_data["weight"] = period_data.get("wt", 1.0)
+                if censor_at_switch and "switch" in period_data and period_data["switch"] == 1:
+                    break
+                expanded.append(period_data)
+        expanded_df = pd.DataFrame(expanded)
+        if expanded_df.empty:
+            return pd.DataFrame(columns=keeplist)
+        available_cols = [col for col in keeplist if col in expanded_df.columns]
+        return expanded_df[available_cols]
 
     def load_expanded_data(self, seed=1234, p_control=0.5):
         # Check if expansion data is valid**
@@ -1175,10 +1197,10 @@ class TrialSequence:
             print("⚠ Expansion data not found. Run expand_trials() first.")
             return
     
-        expanded_data = self.expansion.copy()
+        expanded_data = self.expansion.datastore.data.copy()
     
         print("## Sequence of Trials Data:")
-        print(f"## - Chunk size: {self.expansion_options.get('chunk_size', 500)}")
+        print(f"## - Chunk size: {self.expansion.chunk_size}")
         print("## - Censor at switch: TRUE")
         print("## - First period: 0 | Last period: Inf\n")
         print("## A TE Datastore Datatable object")
@@ -1203,11 +1225,6 @@ class TrialSequence:
             print(expanded_data.tail(5).to_string(index=False))  # Last 5 rows
         else:
             print(expanded_data.to_string(index=False))  # Print full dataset if small
-
-
-
-
-
 
     def show(self):
         print("Trial Sequence Object")    
@@ -1376,6 +1393,8 @@ class TrialSequenceITT(TrialSequence):
         super().set_data(data=data, censor_at_switch = False, ID = "id", period = "period", 
                          treatment = "treatment", outcome = "outcome", eligible = "eligible")
 
+    def set_expansion_options(self, output=None, chunk_size=0, first_period=0, last_period=float('inf')):
+        return super().set_expansion_options(output=output, chunk_size=chunk_size, first_period=first_period, last_period=last_period)
 
 class TrialSequencePP(TrialSequence):
     def __init__(self, expansion=None, outcome_model=None):
@@ -1385,6 +1404,9 @@ class TrialSequencePP(TrialSequence):
     def set_data(self, data: pd.DataFrame, ID = "id", period = "period", treatment = "treatment", outcome = "outcome", eligible = "eligible"):
         super().set_data(data=data, censor_at_switch = True, ID = "id", period = "period", 
                          treatment = "treatment", outcome = "outcome", eligible = "eligible")
+
+    def set_expansion_options(self, output=None, chunk_size=0, first_period=0, last_period=float('inf')):
+        return super().set_expansion_options(output=output, chunk_size=chunk_size, first_period=first_period, last_period=last_period)
 
 class TrialSequenceAT(TrialSequence):
     def __init__(self, expansion=None, outcome_model=None):
