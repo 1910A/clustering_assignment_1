@@ -737,7 +737,7 @@ class TrialSequence:
         self.expansion = te_expansion_unset() if expansion is None else expansion
         self.outcome_model = te_outcome_model_unset() if outcome_model is None else outcome_model
         self.censor_weights = te_weights_unset()  # Will be set later
-        self.switch_weights = None
+        # self.switch_weights = None
         self.outcome_data = None
         if save_path is None:
             save_path = os.path.join(os.getcwd(), f"{estimand.lower()}_models")
@@ -953,7 +953,7 @@ class TrialSequence:
         )
     
         # Fit switch weight models if they exist
-        if hasattr(self, "switch_weights") and self.switch_weights is not None:
+        if not isinstance(self, TrialSequenceITT) and hasattr(self, "switch_weights") and not isinstance(self.switch_weights, te_weights_unset):
             if isinstance(self.switch_weights, te_weights_spec):
                 print("Fitting treatment switching models...")
                 self.switch_weights.fitted = {}  # Initialize fitted models
@@ -969,26 +969,26 @@ class TrialSequence:
                         pickle.dump(switch_model, f)
             else:
                 print("⚠ Warning: switch_weights is not an instance of te_weights_spec. Skipping switch model fitting.")
-        else:
+        elif(not isinstance(self, TrialSequenceITT)):
             print("⚠ No switch weight model set. Use set_switch_weight_model() before calculate_weights().")
     
         return self  # Return updated object
 
 
-    def show_weight_models(trial):
+    def show_weight_models(self):
         #Check if censor weights exist
-        if not hasattr(trial, "censor_weights") or trial.censor_weights is None:
+        if not hasattr(self, "censor_weights") or isinstance(self.censor_weights, te_weights_unset):
             print("⚠ No weight models fitted. Use calculate_weights() first.")
             return
         
-        if trial.censor_weights.fitted is None:
+        if self.censor_weights.fitted is None:
             print("⚠ No fitted weight models found. Use calculate_weights() first.")
             return
     
         print("## Weight Models for Informative Censoring")
         print("## ---------------------------------------\n")
     
-        weight_models = trial.censor_weights.fitted
+        weight_models = self.censor_weights.fitted
     
         for key, model in weight_models.items():
             label_prefix = "P(censor_event = 0 | X)" if key == "numerator" else f"P(censor_event = 0 | X, previous treatment = {0 if 'denominator_0' in key else 1})"
@@ -1018,18 +1018,18 @@ class TrialSequence:
             print(f" {null_deviance:.4f}      {df_null}     {logLik:.4f} {aic:.4f} {bic:.4f} {deviance:.4f} {df_residual}         {nobs} \n")
     
             # Print model save path
-            if hasattr(trial, "save_path") and trial.save_path:
-                model_path = os.path.join(trial.save_path, f"model_{key}.pkl")
+            if hasattr(self, "save_path") and self.save_path:
+                model_path = os.path.join(self.save_path, f"model_{key}.pkl")
                 print(f" path\n {model_path}\n")
             else:
                 print(f"⚠ Warning: No save path provided for {key}. Model not saved.\n")
     
         # Append Treatment Switching Models if available
-        if hasattr(trial, "switch_weights") and trial.switch_weights and trial.switch_weights.fitted:
+        if not isinstance(self, TrialSequenceITT) and not isinstance(self.switch_weights, te_weights_unset) and self.switch_weights.fitted:
             print("\n## Weight Models for Treatment Switching")
             print("## -------------------------------------\n")
     
-            switch_models = trial.switch_weights.fitted
+            switch_models = self.switch_weights.fitted
             for key, model in switch_models.items():
                 print(f"## [[{key}]]")
                 print(f"Model: P(treatment = 1 | previous treatment = {'0' if 'n0' in key else '1'}) for {'numerator' if 'n' in key else 'denominator'}\n")
@@ -1055,13 +1055,13 @@ class TrialSequence:
                 print(" null.deviance df.null logLik    AIC      BIC      deviance df.residual nobs")
                 print(f" {null_deviance:.4f}      {df_null}     {logLik:.4f} {aic:.4f} {bic:.4f} {deviance:.4f} {df_residual}         {nobs} \n")
     
-                if hasattr(trial, "save_path") and trial.save_path:
-                    model_path = os.path.join(trial.save_path, f"model_{key}.pkl")
+                if hasattr(self, "save_path") and self.save_path:
+                    model_path = os.path.join(self.save_path, f"model_{key}.pkl")
                     print(f" path\n {model_path}\n")
                 else:
                     print(f"⚠ Warning: No save path provided for {key}. Model not saved.\n")
     
-        else:
+        elif not isinstance(self, TrialSequenceITT):
             print("\n⚠ No switch weight models fitted. Use set_switch_weight_model() and calculate_weights() first.")
     
     def set_outcome_model(self, adjustment_terms=None):
