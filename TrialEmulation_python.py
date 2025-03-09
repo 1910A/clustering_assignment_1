@@ -10,6 +10,8 @@ from abc import ABC, abstractmethod
 import inspect
 import numpy as np
 import pickle
+import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
 
 # Trial sequence class and function definitions
 def trial_sequence(estimand, **kwargs):
@@ -66,9 +68,10 @@ def data_manipulation(data, use_censor=True):
 
     # Calculate after_eligibility
     data['after_eligibility'] = data.groupby('id').apply(
-        lambda x: x['period'] >= x[x['eligible'] == 1]['period'].min() 
-        if any(x['eligible'] == 1) else True
-    ).reset_index(drop=True)
+        lambda x: (x['period'] >= x.loc[x['eligible'] == 1, 'period'].min()) 
+        if any(x['eligible'] == 1) else pd.Series(True, index=x.index)
+    ).reset_index(level=0, drop=True)
+
 
     if not data['after_eligibility'].all():
         print("Warning: Observations before trial eligibility were removed")
@@ -975,7 +978,7 @@ class TrialSequence:
             print("⚠ No switch weight model set. Use set_switch_weight_model() before calculate_weights().")
     
         return self  # Return updated object
-
+    
 
     def show_weight_models(self):
         #Check if censor weights exist
@@ -1485,4 +1488,3 @@ class TrialSequenceAT(TrialSequence):
     def set_data(self, data: pd.DataFrame, ID = "id", period = "period", treatment = "treatment", outcome = "outcome", eligible = "eligible"):
         super().set_data(data=data, censor_at_switch = False, ID = "id", period = "period", 
                          treatment = "treatment", outcome = "outcome", eligible = "eligible")
-
