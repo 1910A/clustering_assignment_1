@@ -64,17 +64,25 @@ def data_manipulation(data, use_censor=True):
     len_data = len(data)
     len_id = data['id'].nunique()
 
+    # for _, group in data.groupby("id"): ## remove later
+    #     print(group) ## remove later
+    #     print(group['period'] >= group[group['eligible'] == 1]['period'].min() if any(group['eligible'] == 1) else True) ## remove later
+            
     # Calculate after_eligibility
     data['after_eligibility'] = data.groupby('id').apply(
-        lambda x: x['period'] >= x[x['eligible'] == 1]['period'].min() 
-        if any(x['eligible'] == 1) else True
-    ).reset_index(drop=True)
+        lambda x: (x['period'] >= x.loc[x['eligible'] == 1, 'period'].min()) 
+        if any(x['eligible'] == 1) else pd.Series(True, index=x.index)
+    ).reset_index(level=0, drop=True)
+
 
     if not data['after_eligibility'].all():
         print("Warning: Observations before trial eligibility were removed")
         data = data[data['after_eligibility'] == True]
     
     data = data.drop('after_eligibility', axis=1)
+
+     
+
 
     # Instead of the original after_event calculation, use this:
     data['after_event'] = data.groupby('id').apply(
@@ -1205,9 +1213,10 @@ class TrialSequence:
     
         # **🔹 Print first 5 rows, then ellipsis, then last 5 rows**
         if len(expanded_data) > 10:
-            print(expanded_data.head(5).to_string(index=False))  # First 5 rows
-            print("   ---")  # Ellipsis for omitted rows
-            print(expanded_data.tail(5).to_string(index=False))  # Last 5 rows
+            # print(expanded_data.head(5).to_string(index=False))  # First 5 rows
+            # print("   ---")  # Ellipsis for omitted rows
+            # print(expanded_data.tail(5).to_string(index=False))  # Last 5 rows
+            display(expanded_data)
         else:
             print(expanded_data.to_string(index=False))  # Print full dataset if small
 
