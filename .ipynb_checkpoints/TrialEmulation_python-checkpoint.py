@@ -1114,8 +1114,8 @@ class TrialSequence:
         expanded_data = expanded_data.loc[expanded_data.index.repeat(2)].reset_index(drop=True)
     
         # ** Assign values dynamically based on dataset **
-        expanded_data["trial_period"] = 0  # Always 0 for all
-        expanded_data["followup_time"] = np.tile([0, 1], len(expanded_data) // 2)  # Alternate 0,1
+        expanded_data["trial_period"] = 0  
+        expanded_data["followup_time"] = np.tile([0, 1], len(expanded_data) // 2)  
     
         # ** Preserve actual outcome & treatment from the dataset **
         expanded_data["outcome"] = expanded_data.groupby("id")["outcome"].transform("first")
@@ -1125,7 +1125,7 @@ class TrialSequence:
         expanded_data["weight"] = np.where(
             expanded_data["followup_time"] == 0, 
             1.0,  # First row 1.0
-            expanded_data["treatment"] * 0.9 + (1 - expanded_data["treatment"]) * 1.1  # Adjusted dynamically
+            expanded_data["treatment"] * 0.9 + (1 - expanded_data["treatment"]) * 1.1 
         )
     
         # ** Preserve actual X2 and Age values from the dataset **
