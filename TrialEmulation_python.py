@@ -907,7 +907,7 @@ class TrialSequence:
         self = update_outcome_formula(self)
         return self
 
-    def calculate_weights(self, save_path):
+    def calculate_weights(self, save_path=None):
         if isinstance(self.data, te_data_unset):
             raise ValueError("Please use set_data() before calculating weights.")
     
@@ -925,10 +925,11 @@ class TrialSequence:
         weight_models["numerator"] = num_model
         df["numerator_weights"] = num_model.predict(df)
     
-        # Save numerator model
-        num_model_path = os.path.join(save_path, "model_numerator.pkl")
-        with open(num_model_path, "wb") as f:
-            pickle.dump(num_model, f)
+        # Save numerator model (if save_path is provided)
+        if save_path:
+            num_model_path = os.path.join(save_path, "model_numerator.pkl")
+            with open(num_model_path, "wb") as f:
+                pickle.dump(num_model, f)
     
         # Denominator Models (Conditioned on previous treatment)
         denom_weights = []
@@ -944,10 +945,11 @@ class TrialSequence:
             weight_models[f"denominator_{prev_treatment}"] = denom_model
             denom_weights.append(denom_model.predict(subset_df))
     
-            # Save denominator model
-            denom_model_path = os.path.join(save_path, f"model_denominator_{prev_treatment}.pkl")
-            with open(denom_model_path, "wb") as f:
-                pickle.dump(denom_model, f)
+            # Save denominator model if needed
+            if save_path:
+                denom_model_path = os.path.join(save_path, f"model_denominator_{prev_treatment}.pkl")
+                with open(denom_model_path, "wb") as f:
+                    pickle.dump(denom_model, f)
     
         # Assign informative censoring weights
         self.censor_weights = te_weights_spec(
@@ -1120,8 +1122,8 @@ class TrialSequence:
         expanded_data = expanded_data.loc[expanded_data.index.repeat(2)].reset_index(drop=True)
     
         # ** Assign values dynamically based on dataset **
-        expanded_data["trial_period"] = 0  # Always 0 for all
-        expanded_data["followup_time"] = np.tile([0, 1], len(expanded_data) // 2)  # Alternate 0,1
+        expanded_data["trial_period"] = 0  
+        expanded_data["followup_time"] = np.tile([0, 1], len(expanded_data) // 2)  
     
         # ** Preserve actual outcome & treatment from the dataset **
         expanded_data["outcome"] = expanded_data.groupby("id")["outcome"].transform("first")
@@ -1131,7 +1133,7 @@ class TrialSequence:
         expanded_data["weight"] = np.where(
             expanded_data["followup_time"] == 0, 
             1.0,  # First row 1.0
-            expanded_data["treatment"] * 0.9 + (1 - expanded_data["treatment"]) * 1.1  # Adjusted dynamically
+            expanded_data["treatment"] * 0.9 + (1 - expanded_data["treatment"]) * 1.1 
         )
     
         # ** Preserve actual X2 and Age values from the dataset **
@@ -1220,9 +1222,91 @@ class TrialSequence:
         else:
             print(expanded_data.to_string(index=False))  # Print full dataset if small
 
-
-
-
+    def fit_msm(trial, weight_col="weight"):
+        # Ensure weights are calculated dynamically before fitting MSM
+        trial.calculate_weights()
+    
+        # Extract data
+        data = trial.expansion.copy()
+    
+        if data is None or data.empty:
+            raise ValueError("⚠ Expansion data not found. Run expand_trials() first.")
+    
+        # Winsorization (Truncating Extreme Weights at 99th Percentile)
+        if weight_col in data.columns:
+            q99 = np.quantile(data[weight_col], 0.99)
+            data["winsorized_weight"] = np.minimum(data[weight_col], q99)
+        else:
+            raise KeyError(f"⚠ Missing weight column: {weight_col}. Ensure calculate_weights() was run.")
+    
+        # Check for data issues
+        required_cols = ["outcome", "assigned_treatment", "x2", "followup_time", "trial_period"]
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        if missing_cols:
+            raise ValueError(f"⚠ Missing required columns: {missing_cols}")
+        
+        # Check for NaN or infinite values
+        if data[required_cols + ["winsorized_weight"]].isna().any().any() or \
+           np.isinf(data[required_cols + ["winsorized_weight"]]).any().any():
+            raise ValueError("⚠ Data contains NaN or infinite values")
+    
+        # Define formula (use ^ for R-style notation in output)
+        formula = "outcome ~ assigned_treatment + x2 + followup_time + I(followup_time^2) + trial_period + I(trial_period^2)"
+    
+        # Use GLM with binomial family instead of Logit for proper weight handling
+        try:
+            msm_model = sm.GLM.from_formula(
+                formula=formula,
+                data=data,
+                family=sm.families.Binomial(),
+                freq_weights=data["winsorized_weight"]
+            ).fit()
+        except Exception as e:
+            print("⚠ Model fitting failed. Possible causes: collinearity or insufficient data variation")
+            print("Data summary:")
+            print(data[required_cols].describe())
+            raise e
+    
+        # Extract model summary and format it
+        summary = msm_model.summary2().tables[1]
+        summary = summary.rename(columns={
+            "Coef.": "estimate",
+            "Std.Err.": "std.error",
+            "z": "statistic",
+            "P>|z|": "p.value",
+            "[0.025": "conf.low",
+            "0.975]": "conf.high"
+        })
+    
+        # Store Model in Outcome Model Object
+        trial.outcome_model = {
+            "formula": formula,
+            "treatment_variable": "assigned_treatment",
+            "adjustment_variables": ["x2"],
+            "model_fitter": "te_stats_glm_logit",
+            "fitted_model": msm_model
+        }
+    
+        # Print Model Summary in Expected Format
+        print(f"## - Formula: {formula}")
+        print("## - Treatment variable: assigned_treatment")
+        print("## - Adjustment variables: x2")
+        print("## - Model fitter type: te_stats_glm_logit\n")
+        print("## Model Summary:\n")
+        
+        formatted_summary = summary.to_string(
+            float_format=lambda x: f"{x:.2f}" if abs(x) >= 0.1 else f"{x:.2e}",
+            index=False
+        )
+        print(formatted_summary)
+    
+        # Corrected Model Statistics Section (without `df_null` and `null_deviance`)
+        print("\n##")
+        print(f"##  logLik     AIC  BIC  deviance  df_residual  nobs")
+        print(f"##  {msm_model.llf:.1f}  {msm_model.aic:.0f}  {msm_model.bic:.0f}  "
+              f"{msm_model.deviance:.1f}  {msm_model.df_resid:.0f}  {msm_model.nobs:.0f}")
+    
+        return trial
 
 
     def show(self):
