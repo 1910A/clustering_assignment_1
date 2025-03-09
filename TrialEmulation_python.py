@@ -10,6 +10,8 @@ from abc import ABC, abstractmethod
 import inspect
 import numpy as np
 import pickle
+import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
 
 # Trial sequence class and function definitions
 def trial_sequence(estimand, **kwargs):
@@ -64,10 +66,6 @@ def data_manipulation(data, use_censor=True):
     len_data = len(data)
     len_id = data['id'].nunique()
 
-    # for _, group in data.groupby("id"): ## remove later
-    #     print(group) ## remove later
-    #     print(group['period'] >= group[group['eligible'] == 1]['period'].min() if any(group['eligible'] == 1) else True) ## remove later
-            
     # Calculate after_eligibility
     data['after_eligibility'] = data.groupby('id').apply(
         lambda x: (x['period'] >= x.loc[x['eligible'] == 1, 'period'].min()) 
@@ -80,9 +78,6 @@ def data_manipulation(data, use_censor=True):
         data = data[data['after_eligibility'] == True]
     
     data = data.drop('after_eligibility', axis=1)
-
-     
-
 
     # Instead of the original after_event calculation, use this:
     data['after_event'] = data.groupby('id').apply(
@@ -907,7 +902,7 @@ class TrialSequence:
         self = update_outcome_formula(self)
         return self
 
-    def calculate_weights(self, save_path):
+    def calculate_weights(self, save_path=None):
         if isinstance(self.data, te_data_unset):
             raise ValueError("Please use set_data() before calculating weights.")
     
@@ -925,44 +920,31 @@ class TrialSequence:
         weight_models["numerator"] = num_model
         df["numerator_weights"] = num_model.predict(df)
     
-        # Save numerator model
-        num_model_path = os.path.join(save_path, "model_numerator.pkl")
-        with open(num_model_path, "wb") as f:
-            pickle.dump(num_model, f)
+        # Save numerator model (if save_path is provided)
+        if save_path:
+            num_model_path = os.path.join(save_path, "model_numerator.pkl")
+            with open(num_model_path, "wb") as f:
+                pickle.dump(num_model, f)
     
         # Denominator Models (Conditioned on previous treatment)
         denom_weights = []
         for prev_treatment in [0, 1]:
             subset_df = df[df["previous_treatment"] == prev_treatment]
-        
+    
             if subset_df.empty:
                 print(f"⚠ Warning: No data for previous_treatment = {prev_treatment}. Skipping model fit.")
                 continue
-        
-            # Dynamically filter out predictors with only one unique value
-            # Filter predictors dynamically
-            predictors = ["x2", "x1"]  # Add more predictors if needed
-            
-            # Remove constant and near-constant predictors
-            valid_predictors = [col for col in predictors if 1 < subset_df[col].nunique() < len(subset_df)]
-            
-            if not valid_predictors:
-                print(f"⚠ Skipping model fit for previous_treatment = {prev_treatment}: No valid predictors.")
-                continue  # Skip to the next iteration, preventing `denom_formula` from being undefined
-            
-            denom_formula = "censored ~ " + " + ".join(valid_predictors)  # Define formula only if valid predictors exist
-            print(f"📌 Fitting denominator model for previous_treatment = {prev_treatment} with predictors: {valid_predictors}")
-            
-            # Fit model
+    
+            denom_formula = "censored ~ x2 + x1"
             denom_model = sm.Logit.from_formula(denom_formula, data=subset_df).fit(disp=0)
-
             weight_models[f"denominator_{prev_treatment}"] = denom_model
             denom_weights.append(denom_model.predict(subset_df))
-        
-            # Save denominator model
-            denom_model_path = os.path.join(save_path, f"model_denominator_{prev_treatment}.pkl")
-            with open(denom_model_path, "wb") as f:
-                pickle.dump(denom_model, f)
+    
+            # Save denominator model if needed
+            if save_path:
+                denom_model_path = os.path.join(save_path, f"model_denominator_{prev_treatment}.pkl")
+                with open(denom_model_path, "wb") as f:
+                    pickle.dump(denom_model, f)
     
         # Assign informative censoring weights
         self.censor_weights = te_weights_spec(
@@ -996,7 +978,7 @@ class TrialSequence:
             print("⚠ No switch weight model set. Use set_switch_weight_model() before calculate_weights().")
     
         return self  # Return updated object
-
+    
 
     def show_weight_models(self):
         #Check if censor weights exist
@@ -1135,8 +1117,8 @@ class TrialSequence:
         expanded_data = expanded_data.loc[expanded_data.index.repeat(2)].reset_index(drop=True)
     
         # ** Assign values dynamically based on dataset **
-        expanded_data["trial_period"] = 0  # Always 0 for all
-        expanded_data["followup_time"] = np.tile([0, 1], len(expanded_data) // 2)  # Alternate 0,1
+        expanded_data["trial_period"] = 0  
+        expanded_data["followup_time"] = np.tile([0, 1], len(expanded_data) // 2)  
     
         # ** Preserve actual outcome & treatment from the dataset **
         expanded_data["outcome"] = expanded_data.groupby("id")["outcome"].transform("first")
@@ -1146,7 +1128,7 @@ class TrialSequence:
         expanded_data["weight"] = np.where(
             expanded_data["followup_time"] == 0, 
             1.0,  # First row 1.0
-            expanded_data["treatment"] * 0.9 + (1 - expanded_data["treatment"]) * 1.1  # Adjusted dynamically
+            expanded_data["treatment"] * 0.9 + (1 - expanded_data["treatment"]) * 1.1 
         )
     
         # ** Preserve actual X2 and Age values from the dataset **
@@ -1228,16 +1210,97 @@ class TrialSequence:
     
         # **🔹 Print first 5 rows, then ellipsis, then last 5 rows**
         if len(expanded_data) > 10:
-            # print(expanded_data.head(5).to_string(index=False))  # First 5 rows
-            # print("   ---")  # Ellipsis for omitted rows
-            # print(expanded_data.tail(5).to_string(index=False))  # Last 5 rows
-            display(expanded_data)
+            print(expanded_data.head(5).to_string(index=False))  # First 5 rows
+            print("   ---")  # Ellipsis for omitted rows
+            print(expanded_data.tail(5).to_string(index=False))  # Last 5 rows
         else:
             print(expanded_data.to_string(index=False))  # Print full dataset if small
 
-
-
-
+    def fit_msm(trial, weight_col="weight"):
+        # Ensure weights are calculated dynamically before fitting MSM
+        trial.calculate_weights()
+    
+        # Extract data
+        data = trial.expansion.copy()
+    
+        if data is None or data.empty:
+            raise ValueError("⚠ Expansion data not found. Run expand_trials() first.")
+    
+        # Winsorization (Truncating Extreme Weights at 99th Percentile)
+        if weight_col in data.columns:
+            q99 = np.quantile(data[weight_col], 0.99)
+            data["winsorized_weight"] = np.minimum(data[weight_col], q99)
+        else:
+            raise KeyError(f"⚠ Missing weight column: {weight_col}. Ensure calculate_weights() was run.")
+    
+        # Check for data issues
+        required_cols = ["outcome", "assigned_treatment", "x2", "followup_time", "trial_period"]
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        if missing_cols:
+            raise ValueError(f"⚠ Missing required columns: {missing_cols}")
+        
+        # Check for NaN or infinite values
+        if data[required_cols + ["winsorized_weight"]].isna().any().any() or \
+           np.isinf(data[required_cols + ["winsorized_weight"]]).any().any():
+            raise ValueError("⚠ Data contains NaN or infinite values")
+    
+        # Define formula (use ^ for R-style notation in output)
+        formula = "outcome ~ assigned_treatment + x2 + followup_time + I(followup_time^2) + trial_period + I(trial_period^2)"
+    
+        # Use GLM with binomial family instead of Logit for proper weight handling
+        try:
+            msm_model = sm.GLM.from_formula(
+                formula=formula,
+                data=data,
+                family=sm.families.Binomial(),
+                freq_weights=data["winsorized_weight"]
+            ).fit()
+        except Exception as e:
+            print("⚠ Model fitting failed. Possible causes: collinearity or insufficient data variation")
+            print("Data summary:")
+            print(data[required_cols].describe())
+            raise e
+    
+        # Extract model summary and format it
+        summary = msm_model.summary2().tables[1]
+        summary = summary.rename(columns={
+            "Coef.": "estimate",
+            "Std.Err.": "std.error",
+            "z": "statistic",
+            "P>|z|": "p.value",
+            "[0.025": "conf.low",
+            "0.975]": "conf.high"
+        })
+    
+        # Store Model in Outcome Model Object
+        trial.outcome_model = {
+            "formula": formula,
+            "treatment_variable": "assigned_treatment",
+            "adjustment_variables": ["x2"],
+            "model_fitter": "te_stats_glm_logit",
+            "fitted_model": msm_model
+        }
+    
+        # Print Model Summary in Expected Format
+        print(f"## - Formula: {formula}")
+        print("## - Treatment variable: assigned_treatment")
+        print("## - Adjustment variables: x2")
+        print("## - Model fitter type: te_stats_glm_logit\n")
+        print("## Model Summary:\n")
+        
+        formatted_summary = summary.to_string(
+            float_format=lambda x: f"{x:.2f}" if abs(x) >= 0.1 else f"{x:.2e}",
+            index=False
+        )
+        print(formatted_summary)
+    
+        # Corrected Model Statistics Section (without `df_null` and `null_deviance`)
+        print("\n##")
+        print(f"##  logLik     AIC  BIC  deviance  df_residual  nobs")
+        print(f"##  {msm_model.llf:.1f}  {msm_model.aic:.0f}  {msm_model.bic:.0f}  "
+              f"{msm_model.deviance:.1f}  {msm_model.df_resid:.0f}  {msm_model.nobs:.0f}")
+    
+        return trial
 
 
     def show(self):
@@ -1425,4 +1488,3 @@ class TrialSequenceAT(TrialSequence):
     def set_data(self, data: pd.DataFrame, ID = "id", period = "period", treatment = "treatment", outcome = "outcome", eligible = "eligible"):
         super().set_data(data=data, censor_at_switch = False, ID = "id", period = "period", 
                          treatment = "treatment", outcome = "outcome", eligible = "eligible")
-
